@@ -9,6 +9,9 @@
 #define serial_command_append "#\r"
 #define serial_baud_rate 115200
 
+// Reed Switch
+#define PIN_REED_SWITCH D7
+
 // WIFI
 #define WLAN_SSID       "ssid"
 #define WLAN_PASS       "pass"
@@ -17,14 +20,15 @@ WiFiClient client;
 //MQTT SERVER
 #define AIO_SERVER      "mqtt-server"
 #define AIO_SERVERPORT  1883
-#define AIO_USERNAME    "mqtt-user"
-#define AIO_KEY         "mqtt-pass"
+#define AIO_USERNAME    ""
+#define AIO_KEY         ""
 Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
 Adafruit_MQTT_Publish benq_status_pub = Adafruit_MQTT_Publish(&mqtt, "stat/projector/STATUS");
 Adafruit_MQTT_Publish benq_any_command_pub = Adafruit_MQTT_Publish(&mqtt, "stat/projector/COMMAND");
 Adafruit_MQTT_Subscribe benq_power_sub = Adafruit_MQTT_Subscribe(&mqtt, "cmnd/projector/POWER");
 Adafruit_MQTT_Subscribe benq_volume_sub = Adafruit_MQTT_Subscribe(&mqtt, "cmnd/projector/VOLUME");
 Adafruit_MQTT_Subscribe benq_source_sub = Adafruit_MQTT_Subscribe(&mqtt, "cmnd/projector/SOURCE");
+Adafruit_MQTT_Subscribe benq_lamp_sub = Adafruit_MQTT_Subscribe(&mqtt, "cmnd/projector/LAMP");
 Adafruit_MQTT_Subscribe benq_any_command_sub = Adafruit_MQTT_Subscribe(&mqtt, "cmnd/projector/COMMAND");
 
 void MQTT_connect() {
@@ -55,6 +59,9 @@ void MQTT_connect() {
 void setup() {
   Serial.begin(115200);
   Serial1.begin(serial_baud_rate);
+
+  // Setup for reed switch
+  pinMode(PIN_REED_SWITCH, INPUT);
 
   // Connect to WiFi access point.
   Serial.print("Connecting to ");
@@ -106,6 +113,7 @@ void setup() {
   mqtt.subscribe(&benq_power_sub);
   mqtt.subscribe(&benq_volume_sub);
   mqtt.subscribe(&benq_source_sub);
+  mqtt.subscribe(&benq_lamp_sub);
   mqtt.subscribe(&benq_any_command_sub);
 }
 
@@ -125,6 +133,10 @@ void loop() {
     }
     if (subscription == &benq_source_sub) {
       benq_send_any_command("sour="+String((char *)benq_source_sub.lastread));
+      benq_publish_status();
+    }  
+    if (subscription == &benq_lamp_sub) {
+      benq_send_any_command("lampm="+String((char *)benq_lamp_sub.lastread));
       benq_publish_status();
     }    
     if (subscription == &benq_any_command_sub) {
@@ -187,6 +199,26 @@ int benq_get_volume_status() {
   return (regex(current_volume_status, "VOL=([^#]*)")).toInt();
 }
 
+int benq_get_lamp_hours() {
+  char current_lamp_hours[50];
+  serial_send_command("ltim=?").toCharArray(current_lamp_hours,50);
+  return (regex(current_lamp_hours, "IM=([^#]*)")).toInt();
+}
+
+String benq_get_lamp_mode() {
+  char current_lamp_status[50];
+  serial_send_command("lampm=?").toCharArray(current_lamp_status,50);
+  return regex(current_lamp_status, "LAMPM=([^#]*)");
+}
+
+String get_cabinet_door_status() {
+  if (digitalRead(PIN_REED_SWITCH) == HIGH) {
+    return "CLOSED";
+  } else {
+    return "OPEN";
+  }
+}
+
 String benq_collect_status() {
   String current_status;
   current_status += "{";
@@ -194,7 +226,20 @@ String benq_collect_status() {
   current_status += ",";
   current_status += "\"SOURCE\":\"" + benq_get_source_status() + "\"";
   current_status += ",";
-  current_status += "\"VOLUME\":\"" + String(benq_get_volume_status()) + "\"";  
+  current_status += "\"VOLUME\":\"" + String(benq_get_volume_status()) + "\"";
+  current_status += ",";
+
+  // While powering down commands don't respond. Gives us a value of 0,
+  // we dont want that messing up our stats.
+  int lamp_hours = benq_get_lamp_hours();
+  if (lamp_hours != 0) {
+    current_status += "\"LAMP_HOURS\":\"" + String(lamp_hours) + "\"";
+    current_status += ",";
+  }
+  
+  current_status += "\"LAMP_MODE\":\"" + benq_get_lamp_mode() + "\"";
+  current_status += ",";
+  current_status += "\"CABINET_DOOR\":\"" + get_cabinet_door_status() + "\"";
   current_status += "}";
   return current_status;
 }
@@ -205,7 +250,7 @@ void benq_publish_status() {
 
 void benq_set_volume(int target_volume) {
   int delta = target_volume - benq_get_volume_status();
-  for(int i = 0; i <= abs(delta); i++) {
+  for(int i = 1; i <= abs(delta); i++) {
     if(delta > 0) {
       benq_send_any_command("vol=+");
     } else {
